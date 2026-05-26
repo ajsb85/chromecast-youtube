@@ -12,7 +12,7 @@ use rust_cast::{
     channels::{
         heartbeat::HeartbeatResponse,
         media::{Media, StreamType, PlayerState, IdleReason, MediaResponse},
-        receiver::CastDeviceApp,
+        receiver::{CastDeviceApp, Application},
     },
 };
 
@@ -312,6 +312,45 @@ fn start_ipc_listener(socket_path: &str, shared_state: Arc<Mutex<SharedState>>) 
     });
 }
 
+struct ConnectionState {
+    cast_device: CastDevice<'static>,
+    app: Application,
+}
+
+fn establish_connection(ip: &str, port: u16) -> Result<ConnectionState> {
+    println!("Connecting to Cast device at {}:{}...", ip, port);
+    let cast_device = CastDevice::connect_without_host_verification(ip.to_string(), port)
+        .map_err(|e| anyhow!("Failed to establish secure connection to Cast device: {:?}", e))?;
+
+    cast_device
+        .connection
+        .connect(DEFAULT_DESTINATION_ID.to_string())
+        .map_err(|e| anyhow!("Failed to establish virtual connection to receiver-0: {:?}", e))?;
+
+    cast_device
+        .heartbeat
+        .ping()
+        .map_err(|e| anyhow!("Heartbeat ping failed: {:?}", e))?;
+
+    println!("Launching Default Media Receiver (App ID: CC1AD845)...");
+    let app = cast_device
+        .receiver
+        .launch_app(&CastDeviceApp::DefaultMediaReceiver)
+        .map_err(|e| anyhow!("Failed to launch media receiver app: {:?}", e))?;
+
+    println!(
+        "  App successfully run: {} (Session ID: {})",
+        app.display_name, app.session_id
+    );
+
+    cast_device
+        .connection
+        .connect(app.transport_id.as_str())
+        .map_err(|e| anyhow!("Failed to connect to application transport channel: {:?}", e))?;
+
+    Ok(ConnectionState { cast_device, app })
+}
+
 fn main() -> Result<()> {
     let args = Cli::parse();
 
@@ -360,39 +399,9 @@ fn main() -> Result<()> {
     start_ipc_listener(&socket_path, Arc::clone(&shared_state));
 
     // 3. Connect to the Google Cast Device
-    println!("Connecting to Cast device at {}:{}...", ip, port);
-    let cast_device = CastDevice::connect_without_host_verification(ip, port)
-        .map_err(|e| anyhow!("Failed to establish secure connection to Cast device: {:?}", e))?;
-
-    // Connect to the base receiver channel
-    cast_device
-        .connection
-        .connect(DEFAULT_DESTINATION_ID.to_string())
-        .map_err(|e| anyhow!("Failed to establish virtual connection to receiver-0: {:?}", e))?;
-
-    // Send initial ping to confirm socket and channel are open
-    cast_device
-        .heartbeat
-        .ping()
-        .map_err(|e| anyhow!("Heartbeat ping failed: {:?}", e))?;
-
-    // 4. Launch Default Media Receiver app
-    println!("Launching Default Media Receiver (App ID: CC1AD845)...");
-    let app = cast_device
-        .receiver
-        .launch_app(&CastDeviceApp::DefaultMediaReceiver)
-        .map_err(|e| anyhow!("Failed to launch media receiver app: {:?}", e))?;
-
-    println!(
-        "  App successfully run: {} (Session ID: {})",
-        app.display_name, app.session_id
-    );
-
-    // Connect connection channel to our newly started app's transport channel
-    cast_device
-        .connection
-        .connect(app.transport_id.as_str())
-        .map_err(|e| anyhow!("Failed to connect to application transport channel: {:?}", e))?;
+    let conn_state = establish_connection(&ip, port)?;
+    let mut cast_device = conn_state.cast_device;
+    let mut app = conn_state.app;
 
     // 5. Play each item in the playlist sequentially
     loop {
@@ -452,7 +461,7 @@ fn main() -> Result<()> {
             app.transport_id.as_str(),
             app.session_id.as_str(),
             &Media {
-                content_id: stream_url,
+                content_id: stream_url.clone(),
                 content_type,
                 stream_type: StreamType::Buffered,
                 duration: None,
@@ -462,19 +471,59 @@ fn main() -> Result<()> {
             Ok(status) => status,
             Err(e) => {
                 eprintln!(
-                    "\x1b[31mFailed to load media: {:?}. Skipping to next video.\x1b[0m",
+                    "\x1b[31mFailed to load media: {:?}. Attempting to reconnect...\x1b[0m",
                     e
                 );
-                {
-                    let mut state = shared_state.lock().unwrap();
-                    state.current_index += 1;
+                match establish_connection(&ip, port) {
+                    Ok(conn) => {
+                        println!("\x1b[32mSuccessfully reconnected to Cast device!\x1b[0m");
+                        cast_device = conn.cast_device;
+                        app = conn.app;
+                        
+                        // Retry loading media once
+                        match cast_device.media.load(
+                            app.transport_id.as_str(),
+                            app.session_id.as_str(),
+                            &Media {
+                                content_id: stream_url,
+                                content_type: "video/mp4".to_string(),
+                                stream_type: StreamType::Buffered,
+                                duration: None,
+                                metadata: None,
+                            },
+                        ) {
+                            Ok(status) => status,
+                            Err(retry_err) => {
+                                eprintln!(
+                                    "\x1b[31mFailed to load media after reconnection: {:?}. Skipping to next video.\x1b[0m",
+                                    retry_err
+                                );
+                                {
+                                    let mut state = shared_state.lock().unwrap();
+                                    state.current_index += 1;
+                                }
+                                std::thread::sleep(Duration::from_secs(2));
+                                continue;
+                            }
+                        }
+                    }
+                    Err(reconnect_err) => {
+                        eprintln!("\x1b[31mFailed to reconnect: {}. Skipping to next video.\x1b[0m", reconnect_err);
+                        {
+                            let mut state = shared_state.lock().unwrap();
+                            state.current_index += 1;
+                        }
+                        std::thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
                 }
-                continue;
             }
         };
 
+        let mut current_session_id = 0;
         if let Some(entry) = load_status.entries.first() {
             println!("  Playback started. Player State: \x1b[32m{:?}\x1b[0m", entry.player_state);
+            current_session_id = entry.media_session_id;
         }
 
         println!("\x1b[36mPlaying video... Press Ctrl+C to stop casting.\x1b[0m");
@@ -493,30 +542,43 @@ fn main() -> Result<()> {
                     if let MediaResponse::Status(status) = media_response {
                         #[allow(clippy::single_match)]
                         match status.entries.first() {
-                            Some(entry) => match (entry.player_state, entry.idle_reason) {
-                                (PlayerState::Idle, Some(IdleReason::Finished)) => {
-                                    println!("\x1b[32mVideo finished playing naturally.\x1b[0m");
-                                    video_finished = true;
+                            Some(entry) if entry.media_session_id == current_session_id => {
+                                match (entry.player_state, entry.idle_reason) {
+                                    (PlayerState::Idle, Some(IdleReason::Finished)) => {
+                                        println!("\x1b[32mVideo finished playing naturally.\x1b[0m");
+                                        video_finished = true;
+                                    }
+                                    (PlayerState::Idle, Some(IdleReason::Error)) => {
+                                        eprintln!("\x1b[31mPlayer reported an error during playback.\x1b[0m");
+                                        video_finished = true;
+                                    }
+                                    (PlayerState::Idle, Some(IdleReason::Cancelled)) => {
+                                        println!("\x1b[33mPlayback cancelled by sender.\x1b[0m");
+                                        video_finished = true;
+                                    }
+                                    _ => {} // Video is playing, buffering, or paused
                                 }
-                                (PlayerState::Idle, Some(IdleReason::Error)) => {
-                                    eprintln!("\x1b[31mPlayer reported an error during playback.\x1b[0m");
-                                    video_finished = true;
-                                }
-                                (PlayerState::Idle, Some(IdleReason::Cancelled)) => {
-                                    println!("\x1b[33mPlayback cancelled by sender.\x1b[0m");
-                                    video_finished = true;
-                                }
-                                _ => {} // Video is playing, buffering, or paused
-                            },
-                            None => {}
+                            }
+                            _ => {}
                         }
                     }
                 }
                 Ok(_) => {} // Ignore other incoming messages
                 Err(e) => {
-                    eprintln!("Socket error or connection closed: {}", e);
-                    let _ = fs::remove_file(&socket_path);
-                    return Err(anyhow!("Connection error: {}", e));
+                    eprintln!("Socket error or connection closed: {}. Attempting to reconnect...", e);
+                    match establish_connection(&ip, port) {
+                        Ok(conn) => {
+                            println!("\x1b[32mSuccessfully reconnected to Cast device!\x1b[0m");
+                            cast_device = conn.cast_device;
+                            app = conn.app;
+                            video_finished = true; // Terminate active wait loop so we retry loading or continue
+                        }
+                        Err(reconnect_err) => {
+                            eprintln!("Failed to reconnect: {}. Exiting session.", reconnect_err);
+                            let _ = fs::remove_file(&socket_path);
+                            return Err(anyhow!("Connection lost permanently: {}", e));
+                        }
+                    }
                 }
             }
         }
