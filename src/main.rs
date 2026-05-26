@@ -61,39 +61,37 @@ fn discover_devices(timeout: Duration) -> Result<Vec<DiscoveredDevice>> {
     println!("Scanning local network for Google Cast / Nest smart displays...");
 
     while start_time.elapsed() < timeout {
-        if let Ok(event) = receiver.recv_timeout(Duration::from_millis(100)) {
-            if let ServiceEvent::ServiceResolved(info) = event {
-                let friendly_name = info
-                    .get_property_val_str("fn")
-                    .unwrap_or("Unknown Device")
-                    .to_string();
-                let model_name = info
-                    .get_property_val_str("md")
-                    .unwrap_or("Unknown Model")
-                    .to_string();
+        if let Ok(ServiceEvent::ServiceResolved(info)) = receiver.recv_timeout(Duration::from_millis(100)) {
+            let friendly_name = info
+                .get_property_val_str("fn")
+                .unwrap_or("Unknown Device")
+                .to_string();
+            let model_name = info
+                .get_property_val_str("md")
+                .unwrap_or("Unknown Model")
+                .to_string();
 
-                let addresses = info.get_addresses();
-                let ip_addr = addresses
-                    .iter()
-                    .map(|addr| addr.to_string())
-                    .find(|ip| ip.contains('.'))
-                    .or_else(|| addresses.iter().next().map(|addr| addr.to_string()));
+            let addresses = info.get_addresses();
+            let ip_addr = addresses
+                .iter()
+                .map(|addr| addr.to_string())
+                .find(|ip| ip.contains('.'))
+                .or_else(|| addresses.iter().next().map(|addr| addr.to_string()));
 
-                if let Some(ip) = ip_addr {
-                    let device = DiscoveredDevice {
-                        friendly_name,
-                        model_name,
-                        ip,
-                        port: info.get_port(),
-                    };
+            if let Some(ip) = ip_addr {
+                let device = DiscoveredDevice {
+                    friendly_name,
+                    model_name,
+                    ip,
+                    port: info.get_port(),
+                };
 
-                    if !devices.iter().any(|d: &DiscoveredDevice| d.ip == device.ip) {
-                        println!(
-                            "  Found device: \x1b[32m{}\x1b[0m (Model: \x1b[33m{}\x1b[0m, IP: {})",
-                            device.friendly_name, device.model_name, device.ip
-                        );
-                        devices.push(device);
-                    }
+                if !devices.iter().any(|d: &DiscoveredDevice| d.ip == device.ip) {
+                    println!(
+                        "  Found device: \x1b[32m{}\x1b[0m (Model: \x1b[33m{}\x1b[0m, IP: {})",
+                        device.friendly_name, device.model_name, device.ip
+                    );
+                    devices.push(device);
                 }
             }
         }
@@ -151,7 +149,7 @@ fn get_youtube_stream_url(url: &str) -> Result<String> {
     println!("Extracting direct video stream URL from YouTube using yt-dlp...");
 
     let output = Command::new("yt-dlp")
-        .args(&["-g", "-f", "22/18/best[ext=mp4]/best", url])
+        .args(["-g", "-f", "22/18/best[ext=mp4]/best", url])
         .output();
 
     let output = match output {
@@ -159,7 +157,7 @@ fn get_youtube_stream_url(url: &str) -> Result<String> {
         Err(_) => {
             println!("  yt-dlp is not available. Falling back to youtube-dl...");
             Command::new("youtube-dl")
-                .args(&["-g", "-f", "22/18/best[ext=mp4]/best", url])
+                .args(["-g", "-f", "22/18/best[ext=mp4]/best", url])
                 .output()
                 .map_err(|_| anyhow!(
                     "Neither 'yt-dlp' nor 'youtube-dl' was found. Please install 'yt-dlp' to cast YouTube links."
@@ -199,14 +197,14 @@ fn get_playlist_urls(url: &str) -> Result<Vec<String>> {
     println!("Playlist/Channel URL detected. Fetching all video links using yt-dlp...");
 
     let output = Command::new("yt-dlp")
-        .args(&["--flat-playlist", "--print", "%(url)s", url])
+        .args(["--flat-playlist", "--print", "%(url)s", url])
         .output();
 
     let output = match output {
         Ok(out) => out,
         Err(_) => {
             Command::new("youtube-dl")
-                .args(&["--flat-playlist", "--print", "%(url)s", url])
+                .args(["--flat-playlist", "--print", "%(url)s", url])
                 .output()
                 .map_err(|e| anyhow!("Failed to execute 'yt-dlp' or 'youtube-dl': {}", e))?
         }
@@ -369,8 +367,9 @@ fn main() -> Result<()> {
                     }
                     Ok(ChannelMessage::Media(media_response)) => {
                         if let MediaResponse::Status(status) = media_response {
-                            if let Some(entry) = status.entries.first() {
-                                match (entry.player_state, entry.idle_reason) {
+                            #[allow(clippy::single_match)]
+                            match status.entries.first() {
+                                Some(entry) => match (entry.player_state, entry.idle_reason) {
                                     (PlayerState::Idle, Some(IdleReason::Finished)) => {
                                         println!("\x1b[32mVideo finished playing naturally.\x1b[0m");
                                         video_finished = true;
@@ -384,7 +383,8 @@ fn main() -> Result<()> {
                                         video_finished = true;
                                     }
                                     _ => {} // Video is playing, buffering, or paused
-                                }
+                                },
+                                None => {}
                             }
                         }
                     }

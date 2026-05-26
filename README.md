@@ -42,28 +42,28 @@ The compiled binary will be available at `./target/release/chromecast`.
 
 Cast a single YouTube video (auto-detects display):
 ```bash
-cargo run -- https://www.youtube.com/watch?v=XShbT8oXGys
+./chromecast https://www.youtube.com/watch?v=XShbT8oXGys
 ```
 
 Cast an entire YouTube channel or playlist sequentially:
 ```bash
-cargo run -- https://www.youtube.com/@anylist-app
+./chromecast https://www.youtube.com/@anylist-app
 ```
 
 Bypass mDNS discovery and target a specific Cast device IP directly:
 ```bash
-cargo run -- -a 192.168.68.101 https://www.youtube.com/watch?v=XShbT8oXGys
+./chromecast -a 192.168.68.101 https://www.youtube.com/watch?v=XShbT8oXGys
 ```
 
 Customize the mDNS scanning timeout (default: 3 seconds):
 ```bash
-cargo run -- -t 5 https://www.youtube.com/watch?v=XShbT8oXGys
+./chromecast -t 5 https://www.youtube.com/watch?v=XShbT8oXGys
 ```
 
 ## CLI Help Options
 To print all command-line arguments:
 ```bash
-cargo run -- --help
+./chromecast --help
 ```
 
 ## License
