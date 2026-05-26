@@ -19,9 +19,9 @@ const DEFAULT_DESTINATION_ID: &str = "receiver-0";
 #[command(name = "chromecast-youtube")]
 #[command(about = "Casts a YouTube or direct MP4 video/playlist to a Google Cast device / Nest smart display.", long_about = None)]
 struct Cli {
-    /// The YouTube URL, channel URL, playlist URL, or direct MP4 link
-    #[arg(required = true)]
-    url: String,
+    /// The YouTube URL, channel URL, playlist URL, or direct MP4 link(s)
+    #[arg(required = true, num_args = 1..)]
+    urls: Vec<String>,
 
     /// Optional IP address of the target Cast device (bypasses mDNS discovery)
     #[arg(short, long)]
@@ -251,8 +251,16 @@ fn main() -> Result<()> {
         }
     };
 
-    // 2. Fetch Playlist/Channel Video URLs
-    let playlist_urls = get_playlist_urls(&args.url)?;
+    // 2. Fetch Playlist/Channel Video URLs for all input arguments
+    let mut playlist_urls = Vec::new();
+    for input_url in &args.urls {
+        let urls = get_playlist_urls(input_url)?;
+        playlist_urls.extend(urls);
+    }
+
+    if playlist_urls.is_empty() {
+        return Err(anyhow!("No playable video URLs were resolved."));
+    }
 
     // 3. Connect to the Google Cast Device
     println!("Connecting to Cast device at {}:{}...", ip, port);
