@@ -34,6 +34,10 @@ struct Cli {
     /// Set mDNS discovery timeout in seconds
     #[arg(short, long, default_value_t = 3)]
     timeout: u64,
+
+    /// Loop playback of the entire playlist infinitely
+    #[arg(short, long)]
+    loop_playlist: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -287,101 +291,108 @@ fn main() -> Result<()> {
 
     // 5. Play each item in the playlist sequentially
     let total_videos = playlist_urls.len();
-    for (index, video_url) in playlist_urls.iter().enumerate() {
-        println!(
-            "\n\x1b[35m=== Playing Video {}/{} ===\x1b[0m",
-            index + 1,
-            total_videos
-        );
-        println!("Video Link: \x1b[34m{}\x1b[0m", video_url);
+    loop {
+        for (index, video_url) in playlist_urls.iter().enumerate() {
+            println!(
+                "\n\x1b[35m=== Playing Video {}/{} ===\x1b[0m",
+                index + 1,
+                total_videos
+            );
+            println!("Video Link: \x1b[34m{}\x1b[0m", video_url);
 
-        // Extract direct stream URL
-        let stream_url = match get_youtube_stream_url(video_url) {
-            Ok(url) => url,
-            Err(e) => {
-                eprintln!(
-                    "\x1b[31mFailed to extract stream for {}: {}. Skipping to next video.\x1b[0m",
-                    video_url, e
-                );
-                continue;
-            }
-        };
-
-        // Determine content type
-        let mut content_type = "video/mp4".to_string();
-        if video_url.contains(".mp3") {
-            content_type = "audio/mp3".to_string();
-        } else if stream_url.contains(".m3u8") || stream_url.contains("index.m3u8") {
-            content_type = "application/x-mpegURL".to_string();
-        }
-
-        // Load the media
-        println!("Casting media stream to display...");
-        let load_status = match cast_device.media.load(
-            app.transport_id.as_str(),
-            app.session_id.as_str(),
-            &Media {
-                content_id: stream_url,
-                content_type,
-                stream_type: StreamType::Buffered,
-                duration: None,
-                metadata: None,
-            },
-        ) {
-            Ok(status) => status,
-            Err(e) => {
-                eprintln!(
-                    "\x1b[31mFailed to load media: {:?}. Skipping to next video.\x1b[0m",
-                    e
-                );
-                continue;
-            }
-        };
-
-        if let Some(entry) = load_status.entries.first() {
-            println!("  Playback started. Player State: \x1b[32m{:?}\x1b[0m", entry.player_state);
-        }
-
-        println!("\x1b[36mPlaying video... Press Ctrl+C to stop casting.\x1b[0m");
-
-        // Loop to reply to PING and monitor playback status
-        let mut video_finished = false;
-        while !video_finished {
-            match cast_device.receive() {
-                Ok(ChannelMessage::Heartbeat(HeartbeatResponse::Ping)) => {
-                    // Reply with PONG to satisfy keep-alive requirements
-                    if let Err(e) = cast_device.heartbeat.pong() {
-                        eprintln!("Failed to reply with Heartbeat pong: {:?}", e);
-                    }
+            // Extract direct stream URL
+            let stream_url = match get_youtube_stream_url(video_url) {
+                Ok(url) => url,
+                Err(e) => {
+                    eprintln!(
+                        "\x1b[31mFailed to extract stream for {}: {}. Skipping to next video.\x1b[0m",
+                        video_url, e
+                    );
+                    continue;
                 }
-                Ok(ChannelMessage::Media(media_response)) => {
-                    if let MediaResponse::Status(status) = media_response {
-                        if let Some(entry) = status.entries.first() {
-                            match (entry.player_state, entry.idle_reason) {
-                                (PlayerState::Idle, Some(IdleReason::Finished)) => {
-                                    println!("\x1b[32mVideo finished playing naturally.\x1b[0m");
-                                    video_finished = true;
+            };
+
+            // Determine content type
+            let mut content_type = "video/mp4".to_string();
+            if video_url.contains(".mp3") {
+                content_type = "audio/mp3".to_string();
+            } else if stream_url.contains(".m3u8") || stream_url.contains("index.m3u8") {
+                content_type = "application/x-mpegURL".to_string();
+            }
+
+            // Load the media
+            println!("Casting media stream to display...");
+            let load_status = match cast_device.media.load(
+                app.transport_id.as_str(),
+                app.session_id.as_str(),
+                &Media {
+                    content_id: stream_url,
+                    content_type,
+                    stream_type: StreamType::Buffered,
+                    duration: None,
+                    metadata: None,
+                },
+            ) {
+                Ok(status) => status,
+                Err(e) => {
+                    eprintln!(
+                        "\x1b[31mFailed to load media: {:?}. Skipping to next video.\x1b[0m",
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            if let Some(entry) = load_status.entries.first() {
+                println!("  Playback started. Player State: \x1b[32m{:?}\x1b[0m", entry.player_state);
+            }
+
+            println!("\x1b[36mPlaying video... Press Ctrl+C to stop casting.\x1b[0m");
+
+            // Loop to reply to PING and monitor playback status
+            let mut video_finished = false;
+            while !video_finished {
+                match cast_device.receive() {
+                    Ok(ChannelMessage::Heartbeat(HeartbeatResponse::Ping)) => {
+                        // Reply with PONG to satisfy keep-alive requirements
+                        if let Err(e) = cast_device.heartbeat.pong() {
+                            eprintln!("Failed to reply with Heartbeat pong: {:?}", e);
+                        }
+                    }
+                    Ok(ChannelMessage::Media(media_response)) => {
+                        if let MediaResponse::Status(status) = media_response {
+                            if let Some(entry) = status.entries.first() {
+                                match (entry.player_state, entry.idle_reason) {
+                                    (PlayerState::Idle, Some(IdleReason::Finished)) => {
+                                        println!("\x1b[32mVideo finished playing naturally.\x1b[0m");
+                                        video_finished = true;
+                                    }
+                                    (PlayerState::Idle, Some(IdleReason::Error)) => {
+                                        eprintln!("\x1b[31mPlayer reported an error during playback.\x1b[0m");
+                                        video_finished = true;
+                                    }
+                                    (PlayerState::Idle, Some(IdleReason::Cancelled)) => {
+                                        println!("\x1b[33mPlayback cancelled by sender.\x1b[0m");
+                                        video_finished = true;
+                                    }
+                                    _ => {} // Video is playing, buffering, or paused
                                 }
-                                (PlayerState::Idle, Some(IdleReason::Error)) => {
-                                    eprintln!("\x1b[31mPlayer reported an error during playback.\x1b[0m");
-                                    video_finished = true;
-                                }
-                                (PlayerState::Idle, Some(IdleReason::Cancelled)) => {
-                                    println!("\x1b[33mPlayback cancelled by sender.\x1b[0m");
-                                    video_finished = true;
-                                }
-                                _ => {} // Video is playing, buffering, or paused
                             }
                         }
                     }
-                }
-                Ok(_) => {} // Ignore other incoming messages
-                Err(e) => {
-                    eprintln!("Socket error or connection closed: {}", e);
-                    return Err(anyhow!("Connection error: {}", e));
+                    Ok(_) => {} // Ignore other incoming messages
+                    Err(e) => {
+                        eprintln!("Socket error or connection closed: {}", e);
+                        return Err(anyhow!("Connection error: {}", e));
+                    }
                 }
             }
         }
+
+        if !args.loop_playlist {
+            break;
+        }
+        println!("\n\x1b[33mLoop option enabled. Restarting playlist from the beginning...\x1b[0m");
     }
 
     println!("\n\x1b[32mFinished playing all items in the playlist!\x1b[0m");
