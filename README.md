@@ -38,32 +38,72 @@ cargo build --release
 ```
 The compiled binary will be available at `./target/release/chromecast`.
 
-### Usage
+### System-wide Installation
 
-Cast a single YouTube video (auto-detects display):
+You can install the compiled utility system-wide to make the `chromecast` command available from anywhere in your shell:
+
 ```bash
-./chromecast https://www.youtube.com/watch?v=XShbT8oXGys
+sudo cp target/release/chromecast /usr/local/bin/chromecast
+sudo chmod 755 /usr/local/bin/chromecast
 ```
 
-Cast an entire YouTube channel or playlist sequentially:
-```bash
-./chromecast https://www.youtube.com/@anylist-app
+Once installed, you can invoke the program directly as `chromecast` without prefixing it with `./target/release/` or `./`.
+
+### Command-Line Arguments & Options
+
+```
+Usage: chromecast [OPTIONS] <URLS>...
 ```
 
-Bypass mDNS discovery and target a specific Cast device IP directly:
+| Argument / Option | Short | Long | Type | Default | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `<URLS>...` | - | - | `Vec<String>` | *Required* | One or more space-separated YouTube videos, channels, playlists, or direct progressive stream links. |
+| Target Address | `-a` | `--address` | `String` | `None` | Optional IP address of your Cast device. Bypasses standard mDNS discovery to connect directly. |
+| Network Port | `-p` | `--port` | `u16` | `8009` | The TCP port of the Chromecast / Nest display. |
+| Discovery Timeout | `-t` | `--timeout` | `u64` | `3` | Maximum time in seconds to scan the local network for cast devices. |
+| Loop Playback | `-l` | `--loop-playlist` | `Flag` | `Disabled` | Loops the entire unified media queue infinitely. When all videos finish, casting automatically restarts from the first video. |
+
+---
+
+### Usage & Examples
+
+#### 1. Cast a Single YouTube Video (Auto-Discovery)
+Scans the local network, auto-detects Nest displays or Chromecasts, resolves a direct progressive stream, and starts casting:
 ```bash
-./chromecast -a 192.168.68.101 https://www.youtube.com/watch?v=XShbT8oXGys
+chromecast https://www.youtube.com/watch?v=XShbT8oXGys
 ```
 
-Customize the mDNS scanning timeout (default: 3 seconds):
+#### 2. Combine Multiple Playlists & Channels into a Single Queue
+Pass multiple space-separated links. The caster aggregates all individual videos into a single sequential queue:
 ```bash
-./chromecast -t 5 https://www.youtube.com/watch?v=XShbT8oXGys
+chromecast https://www.youtube.com/playlist?list=PLaGRwR1U7ndDySvz0tY3hJHS05iezhw9r https://www.youtube.com/@anylist-app
 ```
 
-## CLI Help Options
-To print all command-line arguments:
+#### 3. Loop the Merged Queue Infinitely (`-l` / `--loop-playlist`)
+Plays all resolved videos from both playlists sequentially. When the final video completes, the queue instantly wraps around and restarts playback from the first item:
 ```bash
-./chromecast --help
+chromecast -l "https://www.youtube.com/playlist?list=PLaGRwR1U7ndDySvz0tY3hJHS05iezhw9r" "https://www.youtube.com/playlist?list=PLaGRwR1U7ndCj2SwBXmOZBlzO7g9jlO1Z"
+```
+
+#### 4. Cast to a Specific IP Address Directly (`-a` / `--address`)
+Skips mDNS discovery completely and connects directly to the specified IP address:
+```bash
+chromecast -a 192.168.68.101 https://www.youtube.com/watch?v=XShbT8oXGys
+```
+
+#### 5. Adjust mDNS Search Duration (`-t` / `--timeout`)
+Allows more or less time (in seconds) to query network devices before selecting a target display:
+```bash
+chromecast -t 6 https://www.youtube.com/watch?v=XShbT8oXGys
+```
+
+---
+
+## CLI Help Interface
+
+To view all arguments, flags, and options from the terminal:
+```bash
+chromecast --help
 ```
 
 ## License
