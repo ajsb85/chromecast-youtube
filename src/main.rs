@@ -1,5 +1,9 @@
 use std::time::{Duration, Instant};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::io::{Read, Write};
+use std::fs;
 use clap::Parser;
 use anyhow::{anyhow, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
@@ -38,6 +42,10 @@ struct Cli {
     /// Loop playback of the entire playlist infinitely
     #[arg(short, long)]
     loop_playlist: bool,
+
+    /// Add/append URL(s) to the currently running cast session
+    #[arg(short = 'd', long)]
+    add: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -231,8 +239,90 @@ fn get_playlist_urls(url: &str) -> Result<Vec<String>> {
     Ok(urls)
 }
 
+#[derive(Debug)]
+struct SharedState {
+    urls: Vec<String>,
+    current_index: usize,
+}
+
+fn send_urls_to_running_instance(socket_path: &str, urls: &[String]) -> Result<()> {
+    let mut stream = UnixStream::connect(socket_path)
+        .map_err(|e| anyhow!("Failed to connect to running chromecast instance at {}: {}. Is it running?", socket_path, e))?;
+    
+    let payload = urls.join("\n");
+    stream.write_all(payload.as_bytes())?;
+    println!("Successfully appended {} URL(s) to the currently playing queue.", urls.len());
+    Ok(())
+}
+
+fn start_ipc_listener(socket_path: &str, shared_state: Arc<Mutex<SharedState>>) {
+    // Delete stale socket file if it exists
+    let _ = fs::remove_file(socket_path);
+
+    let listener = match UnixListener::bind(socket_path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Failed to bind Unix socket at {}: {}", socket_path, e);
+            return;
+        }
+    };
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut stream) => {
+                    let mut buffer = String::new();
+                    if stream.read_to_string(&mut buffer).is_ok() {
+                        let new_urls: Vec<String> = buffer
+                            .lines()
+                            .map(|line| line.trim().to_string())
+                            .filter(|line| !line.is_empty())
+                            .collect();
+
+                        if !new_urls.is_empty() {
+                            let mut resolved_urls = Vec::new();
+                            for url in new_urls {
+                                match get_playlist_urls(&url) {
+                                    Ok(urls) => resolved_urls.extend(urls),
+                                    Err(e) => eprintln!("Failed to resolve playlist URL {}: {}", url, e),
+                                }
+                            }
+
+                            if !resolved_urls.is_empty() {
+                                let mut state = shared_state.lock().unwrap();
+                                let old_len = state.urls.len();
+                                state.urls.extend(resolved_urls.clone());
+                                println!(
+                                    "\n\x1b[32m[IPC] Appended {} new resolved video(s) to the queue (total videos: {})\x1b[0m",
+                                    resolved_urls.len(),
+                                    state.urls.len()
+                                );
+                                for (i, url) in resolved_urls.iter().enumerate() {
+                                    println!("  [{}] {}", old_len + i + 1, url);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error accepting IPC connection: {}", e);
+                }
+            }
+        }
+    });
+}
+
 fn main() -> Result<()> {
     let args = Cli::parse();
+
+    // Determine the user's socket path
+    let username = std::env::var("USER").unwrap_or_else(|_| "default".to_string());
+    let socket_path = format!("/tmp/chromecast_{}.sock", username);
+
+    // If --add is specified, send the URL arguments to the running instance and exit
+    if args.add {
+        return send_urls_to_running_instance(&socket_path, &args.urls);
+    }
 
     // 1. Resolve Cast Device (Discovery or direct argument)
     let (ip, port) = match args.address {
@@ -259,6 +349,15 @@ fn main() -> Result<()> {
     if playlist_urls.is_empty() {
         return Err(anyhow!("No playable video URLs were resolved."));
     }
+
+    // Initialize shared state
+    let shared_state = Arc::new(Mutex::new(SharedState {
+        urls: playlist_urls,
+        current_index: 0,
+    }));
+
+    // Start IPC listener
+    start_ipc_listener(&socket_path, Arc::clone(&shared_state));
 
     // 3. Connect to the Google Cast Device
     println!("Connecting to Cast device at {}:{}...", ip, port);
@@ -296,113 +395,140 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow!("Failed to connect to application transport channel: {:?}", e))?;
 
     // 5. Play each item in the playlist sequentially
-    let total_videos = playlist_urls.len();
     loop {
-        for (index, video_url) in playlist_urls.iter().enumerate() {
-            println!(
-                "\n\x1b[35m=== Playing Video {}/{} ===\x1b[0m",
-                index + 1,
-                total_videos
-            );
-            println!("Video Link: \x1b[34m{}\x1b[0m", video_url);
-
-            // Extract direct stream URL
-            let stream_url = match get_youtube_stream_url(video_url) {
-                Ok(url) => url,
-                Err(e) => {
-                    eprintln!(
-                        "\x1b[31mFailed to extract stream for {}: {}. Skipping to next video.\x1b[0m",
-                        video_url, e
-                    );
-                    continue;
+        let (video_url, index, total_videos) = {
+            let mut state = shared_state.lock().unwrap();
+            
+            // Check if we reached the end of the playlist
+            if state.current_index >= state.urls.len() {
+                if args.loop_playlist && !state.urls.is_empty() {
+                    println!("\n\x1b[33mLoop option enabled. Restarting playlist from the beginning...\x1b[0m");
+                    state.current_index = 0;
+                } else {
+                    // No more videos to play
+                    break;
                 }
-            };
-
-            // Determine content type
-            let mut content_type = "video/mp4".to_string();
-            if video_url.contains(".mp3") {
-                content_type = "audio/mp3".to_string();
-            } else if stream_url.contains(".m3u8") || stream_url.contains("index.m3u8") {
-                content_type = "application/x-mpegURL".to_string();
             }
 
-            // Load the media
-            println!("Casting media stream to display...");
-            let load_status = match cast_device.media.load(
-                app.transport_id.as_str(),
-                app.session_id.as_str(),
-                &Media {
-                    content_id: stream_url,
-                    content_type,
-                    stream_type: StreamType::Buffered,
-                    duration: None,
-                    metadata: None,
-                },
-            ) {
-                Ok(status) => status,
-                Err(e) => {
-                    eprintln!(
-                        "\x1b[31mFailed to load media: {:?}. Skipping to next video.\x1b[0m",
-                        e
-                    );
-                    continue;
+            let url = state.urls[state.current_index].clone();
+            let total = state.urls.len();
+            (url, state.current_index, total)
+        };
+
+        println!(
+            "\n\x1b[35m=== Playing Video {}/{} ===\x1b[0m",
+            index + 1,
+            total_videos
+        );
+        println!("Video Link: \x1b[34m{}\x1b[0m", video_url);
+
+        // Extract direct stream URL
+        let stream_url = match get_youtube_stream_url(&video_url) {
+            Ok(url) => url,
+            Err(e) => {
+                eprintln!(
+                    "\x1b[31mFailed to extract stream for {}: {}. Skipping to next video.\x1b[0m",
+                    video_url, e
+                );
+                {
+                    let mut state = shared_state.lock().unwrap();
+                    state.current_index += 1;
                 }
-            };
-
-            if let Some(entry) = load_status.entries.first() {
-                println!("  Playback started. Player State: \x1b[32m{:?}\x1b[0m", entry.player_state);
+                continue;
             }
+        };
 
-            println!("\x1b[36mPlaying video... Press Ctrl+C to stop casting.\x1b[0m");
+        // Determine content type
+        let mut content_type = "video/mp4".to_string();
+        if video_url.contains(".mp3") {
+            content_type = "audio/mp3".to_string();
+        } else if stream_url.contains(".m3u8") || stream_url.contains("index.m3u8") {
+            content_type = "application/x-mpegURL".to_string();
+        }
 
-            // Loop to reply to PING and monitor playback status
-            let mut video_finished = false;
-            while !video_finished {
-                match cast_device.receive() {
-                    Ok(ChannelMessage::Heartbeat(HeartbeatResponse::Ping)) => {
-                        // Reply with PONG to satisfy keep-alive requirements
-                        if let Err(e) = cast_device.heartbeat.pong() {
-                            eprintln!("Failed to reply with Heartbeat pong: {:?}", e);
+        // Load the media
+        println!("Casting media stream to display...");
+        let load_status = match cast_device.media.load(
+            app.transport_id.as_str(),
+            app.session_id.as_str(),
+            &Media {
+                content_id: stream_url,
+                content_type,
+                stream_type: StreamType::Buffered,
+                duration: None,
+                metadata: None,
+            },
+        ) {
+            Ok(status) => status,
+            Err(e) => {
+                eprintln!(
+                    "\x1b[31mFailed to load media: {:?}. Skipping to next video.\x1b[0m",
+                    e
+                );
+                {
+                    let mut state = shared_state.lock().unwrap();
+                    state.current_index += 1;
+                }
+                continue;
+            }
+        };
+
+        if let Some(entry) = load_status.entries.first() {
+            println!("  Playback started. Player State: \x1b[32m{:?}\x1b[0m", entry.player_state);
+        }
+
+        println!("\x1b[36mPlaying video... Press Ctrl+C to stop casting.\x1b[0m");
+
+        // Loop to reply to PING and monitor playback status
+        let mut video_finished = false;
+        while !video_finished {
+            match cast_device.receive() {
+                Ok(ChannelMessage::Heartbeat(HeartbeatResponse::Ping)) => {
+                    // Reply with PONG to satisfy keep-alive requirements
+                    if let Err(e) = cast_device.heartbeat.pong() {
+                        eprintln!("Failed to reply with Heartbeat pong: {:?}", e);
+                    }
+                }
+                Ok(ChannelMessage::Media(media_response)) => {
+                    if let MediaResponse::Status(status) = media_response {
+                        #[allow(clippy::single_match)]
+                        match status.entries.first() {
+                            Some(entry) => match (entry.player_state, entry.idle_reason) {
+                                (PlayerState::Idle, Some(IdleReason::Finished)) => {
+                                    println!("\x1b[32mVideo finished playing naturally.\x1b[0m");
+                                    video_finished = true;
+                                }
+                                (PlayerState::Idle, Some(IdleReason::Error)) => {
+                                    eprintln!("\x1b[31mPlayer reported an error during playback.\x1b[0m");
+                                    video_finished = true;
+                                }
+                                (PlayerState::Idle, Some(IdleReason::Cancelled)) => {
+                                    println!("\x1b[33mPlayback cancelled by sender.\x1b[0m");
+                                    video_finished = true;
+                                }
+                                _ => {} // Video is playing, buffering, or paused
+                            },
+                            None => {}
                         }
                     }
-                    Ok(ChannelMessage::Media(media_response)) => {
-                        if let MediaResponse::Status(status) = media_response {
-                            #[allow(clippy::single_match)]
-                            match status.entries.first() {
-                                Some(entry) => match (entry.player_state, entry.idle_reason) {
-                                    (PlayerState::Idle, Some(IdleReason::Finished)) => {
-                                        println!("\x1b[32mVideo finished playing naturally.\x1b[0m");
-                                        video_finished = true;
-                                    }
-                                    (PlayerState::Idle, Some(IdleReason::Error)) => {
-                                        eprintln!("\x1b[31mPlayer reported an error during playback.\x1b[0m");
-                                        video_finished = true;
-                                    }
-                                    (PlayerState::Idle, Some(IdleReason::Cancelled)) => {
-                                        println!("\x1b[33mPlayback cancelled by sender.\x1b[0m");
-                                        video_finished = true;
-                                    }
-                                    _ => {} // Video is playing, buffering, or paused
-                                },
-                                None => {}
-                            }
-                        }
-                    }
-                    Ok(_) => {} // Ignore other incoming messages
-                    Err(e) => {
-                        eprintln!("Socket error or connection closed: {}", e);
-                        return Err(anyhow!("Connection error: {}", e));
-                    }
+                }
+                Ok(_) => {} // Ignore other incoming messages
+                Err(e) => {
+                    eprintln!("Socket error or connection closed: {}", e);
+                    let _ = fs::remove_file(&socket_path);
+                    return Err(anyhow!("Connection error: {}", e));
                 }
             }
         }
 
-        if !args.loop_playlist {
-            break;
+        // Increment index to play the next video
+        {
+            let mut state = shared_state.lock().unwrap();
+            state.current_index += 1;
         }
-        println!("\n\x1b[33mLoop option enabled. Restarting playlist from the beginning...\x1b[0m");
     }
 
     println!("\n\x1b[32mFinished playing all items in the playlist!\x1b[0m");
+    let _ = fs::remove_file(socket_path);
     Ok(())
 }

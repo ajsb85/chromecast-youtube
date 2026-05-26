@@ -62,6 +62,7 @@ Usage: chromecast [OPTIONS] <URLS>...
 | Network Port | `-p` | `--port` | `u16` | `8009` | The TCP port of the Chromecast / Nest display. |
 | Discovery Timeout | `-t` | `--timeout` | `u64` | `3` | Maximum time in seconds to scan the local network for cast devices. |
 | Loop Playback | `-l` | `--loop-playlist` | `Flag` | `Disabled` | Loops the entire unified media queue infinitely. When all videos finish, casting automatically restarts from the first video. |
+| Append to Queue | `-d` | `--add` | `Flag` | `Disabled` | Connects to the currently playing casting session via a local IPC socket and appends the new URL(s) to the active playlist queue without restarting playback. |
 
 ---
 
@@ -96,6 +97,13 @@ Allows more or less time (in seconds) to query network devices before selecting 
 ```bash
 chromecast -t 6 https://www.youtube.com/watch?v=XShbT8oXGys
 ```
+
+#### 6. Dynamically Append to the Running Playlist Queue (`-d` / `--add`)
+If you already have a casting session running in another terminal, you can dynamically append new videos, channels, or playlists to the active queue without stopping or restarting playback:
+```bash
+chromecast -d https://www.youtube.com/watch?v=XShbT8oXGys
+```
+This resolves the target URL(s) and appends them directly to the end of the active playlist. The running cast session will play them sequentially once the earlier videos in the queue are completed.
 
 ---
 
