@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+Cargo.lock
+.antigravitycli/
+.idea/
+.vscode/
+*.swp
+.DS_Store

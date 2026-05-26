@@ -1,0 +1,10 @@
+[package]
+name = "chromecast"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rust_cast = "0.21.0"
+mdns-sd = "0.17"
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
